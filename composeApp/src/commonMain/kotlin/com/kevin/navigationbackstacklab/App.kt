@@ -156,7 +156,7 @@ private val scenarios = listOf(
 @Composable
 private fun NavigationBackstackLab() {
     var selectedIndex by rememberSaveable { mutableStateOf(3) }
-    var nav by remember { mutableStateOf(scenarios[3].preset) }
+    var nav by remember { mutableStateOf(scenarios[selectedIndex].preset) }
     val selected = scenarios[selectedIndex]
 
     // System Back (Android back gesture / button) drives the same stack as the on-screen Back.
