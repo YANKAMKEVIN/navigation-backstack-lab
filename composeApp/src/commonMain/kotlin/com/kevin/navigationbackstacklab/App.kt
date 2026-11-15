@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -40,6 +41,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -81,7 +86,8 @@ private data class NavCopy(
     val body: String,
     val rule: String,
     val accent: Color,
-    val stack: List<String>
+    /** Navigation state loaded when the scenario is picked; the user can then push, pop, etc. */
+    val preset: NavState
 )
 
 private val Paper = Color(0xFFF5F0E8)
@@ -102,7 +108,7 @@ private val scenarios = listOf(
         body = "Each primary destination owns its own navigation memory.",
         rule = "Switching tabs should not destroy where the user was.",
         accent = Green,
-        stack = listOf("Home", "Feed")
+        preset = NavState().push("Feed").switchTab(NavTab.Inbox).push("Thread/18").switchTab(NavTab.Home)
     ),
     NavCopy(
         scenario = NavScenario.Detail,
@@ -111,7 +117,7 @@ private val scenarios = listOf(
         body = "A detail route should preserve the list context behind it.",
         rule = "Back should return to the decision surface, not restart the task.",
         accent = Blue,
-        stack = listOf("Home", "Feed", "Article/42")
+        preset = NavState().push("Feed").push("Article/42")
     ),
     NavCopy(
         scenario = NavScenario.Modal,
@@ -120,7 +126,7 @@ private val scenarios = listOf(
         body = "Sheet and dialog destinations should be dismissible without damaging the stack.",
         rule = "A modal route is an interruption layer, not a new home.",
         accent = Gold,
-        stack = listOf("Home", "Feed", "Article/42", "ShareSheet")
+        preset = NavState().push("Feed").push("Article/42").openModal("ShareSheet")
     ),
     NavCopy(
         scenario = NavScenario.DeepLink,
@@ -129,7 +135,7 @@ private val scenarios = listOf(
         body = "Opening a nested screen from outside should create a back path that makes sense.",
         rule = "Deep links need product context, not only a destination id.",
         accent = Violet,
-        stack = listOf("Home", "Inbox", "Thread/18", "Receipt")
+        preset = NavState().deepLink(NavTab.Inbox, listOf("Thread/18", "Receipt"))
     ),
     NavCopy(
         scenario = NavScenario.Back,
@@ -138,14 +144,19 @@ private val scenarios = listOf(
         body = "The next back action should be visible enough for designers and engineers to reason about.",
         rule = "Back behavior is part of UX quality, not just platform plumbing.",
         accent = Coral,
-        stack = listOf("Home", "Feed", "Article/42")
+        preset = NavState().push("Feed").push("Article/42")
     )
 )
 
 @Composable
 private fun NavigationBackstackLab() {
     var selectedIndex by remember { mutableStateOf(3) }
+    var nav by remember { mutableStateOf(scenarios[3].preset) }
     val selected = scenarios[selectedIndex]
+
+    // System Back (Android back gesture / button) drives the same stack as the on-screen Back.
+    // Disabled at the root of the start tab so the system can close the app as usual.
+    SystemBackHandler(enabled = nav.canGoBack()) { nav = nav.back() }
 
     LazyColumn(
         modifier = Modifier
@@ -159,21 +170,20 @@ private fun NavigationBackstackLab() {
         item {
             ScenarioTabs(
                 selectedIndex = selectedIndex,
-                onSelected = { selectedIndex = it },
+                onSelected = {
+                    selectedIndex = it
+                    nav = scenarios[it].preset
+                },
                 modifier = Modifier.padding(start = 20.dp)
             )
         }
         item {
-            AnimatedContent(
-                targetState = selected,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
-                label = "nav-scenario"
-            ) { scenario ->
-                BackstackPanel(
-                    copy = scenario,
-                    modifier = Modifier.padding(horizontal = 20.dp)
-                )
-            }
+            BackstackPanel(
+                copy = selected,
+                nav = nav,
+                onNav = { nav = it },
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
         }
         item {
             RuleCard(
@@ -241,7 +251,12 @@ private fun ScenarioTabs(
 }
 
 @Composable
-private fun BackstackPanel(copy: NavCopy, modifier: Modifier = Modifier) {
+private fun BackstackPanel(
+    copy: NavCopy,
+    nav: NavState,
+    onNav: (NavState) -> Unit,
+    modifier: Modifier = Modifier
+) {
     ElevatedCard(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -252,7 +267,7 @@ private fun BackstackPanel(copy: NavCopy, modifier: Modifier = Modifier) {
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            RoutePreview(copy)
+            RoutePreview(copy, nav, onNav)
             Text(
                 text = copy.title,
                 color = Ink,
@@ -270,11 +285,11 @@ private fun BackstackPanel(copy: NavCopy, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun RoutePreview(copy: NavCopy) {
+private fun RoutePreview(copy: NavCopy, nav: NavState, onNav: (NavState) -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(345.dp),
+            .heightIn(min = 345.dp),
         shape = RoundedCornerShape(22.dp),
         color = Paper,
         border = BorderStroke(1.dp, Line)
@@ -283,15 +298,22 @@ private fun RoutePreview(copy: NavCopy) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            PhoneTopBar(copy)
-            DestinationCanvas(copy)
-            StackViewer(copy)
+            PhoneTopBar(copy, nav, onBack = { onNav(nav.back()) })
+            AnimatedContent(
+                targetState = nav.top,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "destination"
+            ) { _ ->
+                DestinationCanvas(copy, nav)
+            }
+            NavControls(copy, nav, onNav)
+            StackViewer(copy, nav)
         }
     }
 }
 
 @Composable
-private fun PhoneTopBar(copy: NavCopy) {
+private fun PhoneTopBar(copy: NavCopy, nav: NavState, onBack: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(9.dp)
@@ -304,32 +326,38 @@ private fun PhoneTopBar(copy: NavCopy) {
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = copy.stack.last().take(1),
+                text = nav.top.take(1),
                 color = Color.White,
                 fontWeight = FontWeight.Black
             )
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = copy.stack.last(),
+                text = nav.top,
                 color = Ink,
                 fontWeight = FontWeight.Black,
                 fontSize = 18.sp
             )
             Text(
-                text = "${copy.stack.size} routes in stack",
+                text = "${nav.visibleStack.size} routes · ${nav.currentTab.name} tab",
                 color = Muted,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
         }
+        val canGoBack = nav.canGoBack()
         Surface(
+            onClick = onBack,
+            enabled = canGoBack,
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .alpha(if (canGoBack) 1f else 0.4f),
             shape = RoundedCornerShape(50),
             color = Color.White,
             border = BorderStroke(1.dp, Line)
         ) {
             Text(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 15.dp),
                 text = "Back",
                 color = Ink,
                 fontWeight = FontWeight.Black,
@@ -340,7 +368,7 @@ private fun PhoneTopBar(copy: NavCopy) {
 }
 
 @Composable
-private fun DestinationCanvas(copy: NavCopy) {
+private fun DestinationCanvas(copy: NavCopy, nav: NavState) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -370,7 +398,7 @@ private fun DestinationCanvas(copy: NavCopy) {
         Surface(
             modifier = Modifier.weight(1.1f),
             shape = RoundedCornerShape(18.dp),
-            color = if (copy.scenario == NavScenario.Modal) copy.accent.copy(alpha = 0.16f) else Color.White
+            color = if (nav.modal != null) copy.accent.copy(alpha = 0.16f) else Color.White
         ) {
             Column(
                 modifier = Modifier.padding(12.dp),
@@ -384,7 +412,7 @@ private fun DestinationCanvas(copy: NavCopy) {
                         .background(copy.accent.copy(alpha = 0.18f))
                 )
                 Text(
-                    text = destinationLabel(copy.scenario),
+                    text = destinationLabel(nav),
                     color = Ink,
                     fontWeight = FontWeight.Black,
                     fontSize = 14.sp
@@ -395,7 +423,8 @@ private fun DestinationCanvas(copy: NavCopy) {
 }
 
 @Composable
-private fun StackViewer(copy: NavCopy) {
+private fun StackViewer(copy: NavCopy, nav: NavState) {
+    val stack = nav.visibleStack
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -405,19 +434,81 @@ private fun StackViewer(copy: NavCopy) {
             fontWeight = FontWeight.Black,
             fontSize = 13.sp
         )
-        copy.stack.forEachIndexed { index, route ->
+        stack.forEachIndexed { index, route ->
             StackRow(
                 route = route,
                 index = index + 1,
-                isTop = index == copy.stack.lastIndex,
+                isTop = index == stack.lastIndex,
+                isModal = nav.modal != null && index == stack.lastIndex,
                 accent = copy.accent
             )
+        }
+        Text(
+            text = if (nav.canGoBack()) "Next Back: ${nav.back().top}" else "Next Back: leaves the app",
+            color = copy.accent,
+            fontWeight = FontWeight.Black,
+            fontSize = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun NavControls(copy: NavCopy, nav: NavState, onNav: (NavState) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            NavTab.entries.forEach { tab ->
+                ControlChip(
+                    label = tab.name,
+                    selected = nav.currentTab == tab,
+                    accent = copy.accent,
+                    role = Role.Tab,
+                    modifier = Modifier.weight(1f)
+                ) { onNav(nav.switchTab(tab)) }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ControlChip("Open next", selected = false, accent = copy.accent, modifier = Modifier.weight(1f)) {
+                onNav(nav.push(nextRoute(nav.currentStack.last())))
+            }
+            ControlChip("Share", selected = false, accent = copy.accent, modifier = Modifier.weight(1f)) {
+                onNav(nav.openModal("ShareSheet"))
+            }
+            ControlChip("Deep link", selected = false, accent = copy.accent, modifier = Modifier.weight(1f)) {
+                onNav(nav.deepLink(NavTab.Inbox, listOf("Thread/18", "Receipt")))
+            }
         }
     }
 }
 
 @Composable
-private fun StackRow(route: String, index: Int, isTop: Boolean, accent: Color) {
+private fun ControlChip(
+    label: String,
+    selected: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    role: Role = Role.Button,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (selected) accent else Color.White)
+            .clickable(role = role, onClick = onClick)
+            .semantics { this.selected = selected },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Color.White else Ink,
+            fontWeight = FontWeight.Black,
+            fontSize = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun StackRow(route: String, index: Int, isTop: Boolean, isModal: Boolean, accent: Color) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -449,7 +540,11 @@ private fun StackRow(route: String, index: Int, isTop: Boolean, accent: Color) {
             modifier = Modifier.weight(1f)
         )
         Text(
-            text = if (isTop) "top" else "kept",
+            text = when {
+                isModal -> "modal"
+                isTop -> "top"
+                else -> "kept"
+            },
             color = Muted,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold
@@ -501,11 +596,9 @@ private fun RuleCard(copy: NavCopy, modifier: Modifier = Modifier) {
     }
 }
 
-private fun destinationLabel(scenario: NavScenario): String =
-    when (scenario) {
-        NavScenario.Tabs -> "Primary tab"
-        NavScenario.Detail -> "Detail destination"
-        NavScenario.Modal -> "Modal layer"
-        NavScenario.DeepLink -> "External entry"
-        NavScenario.Back -> "Next back target"
+private fun destinationLabel(nav: NavState): String =
+    when {
+        nav.modal != null -> "Modal layer"
+        nav.currentStack.size == 1 -> "Primary tab"
+        else -> "Detail destination"
     }
